@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-repo-preflight"
+dynamic = ["version"]
+description = "Read-only preflight for a freshly cloned repo: inventories agent rule files and repo-declared MCP or hook config and flags risky patterns before a coding agent opens the tree."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = []
+authors = [{ name = "Digital Fortress" }]
+keywords = ["ai-agent-security", "coding-agents", "agents-md", "mcp", "supply-chain-security", "devsecops"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: System Administrators",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/digitalfortressaudit/agent-repo-preflight"
+Source = "https://github.com/digitalfortressaudit/agent-repo-preflight"
+Issues = "https://github.com/digitalfortressaudit/agent-repo-preflight/issues"
+Changelog = "https://github.com/digitalfortressaudit/agent-repo-preflight/releases"
+
+[project.scripts]
+agent-repo-preflight = "agent_repo_preflight:main"
+
+[tool.setuptools]
+py-modules = ["agent_repo_preflight"]
+
+[tool.setuptools.dynamic]
+version = { attr = "agent_repo_preflight.__version__" }
