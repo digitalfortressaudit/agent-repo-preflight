@@ -18,7 +18,7 @@ import unicodedata
 from pathlib import Path
 from typing import Optional
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -166,6 +166,20 @@ _STOPWORDS = frozenset(
 
 _HOOK_MARKERS = frozenset({"type", "command", "matcher"})
 
+# Claude Code settings keys that approve servers from a project ``.mcp.json``
+# without the per-server prompt. ``disabledMcpjsonServers`` only rejects
+# servers, so it is not reported.
+_MCPJSON_APPROVE_ALL = "enableAllProjectMcpServers"
+_MCPJSON_APPROVE_LIST = "enabledMcpjsonServers"
+
+# Inside ``.github/agents/``, ``.cursor/rules/``, and ``.clinerules*`` folders,
+# only these known binary types may be skipped (extension matched
+# case-insensitively, plus files named ``.DS_Store``). Any other file there that
+# is not valid UTF-8 or contains a NUL byte is an error, because a loader may
+# still read it as text.
+_BINARY_SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".svgz", ".pdf")
+_BINARY_SKIP_NAMES = frozenset({".DS_Store"})
+
 
 class UsageError(Exception):
     """The path or flag could not be used. The process exits 2."""
@@ -188,6 +202,8 @@ def classify(relative: str) -> Optional[str]:
         return "rule"
     if name == "mcp.json" and parent in {".cursor", ".vscode"}:
         return "config"
+    if name == ".mcp.json":
+        return "config"
     if name == "settings.json" and parent == ".vscode":
         return "config"
     if name == "config.json" and parent == ".zcode":
@@ -204,6 +220,21 @@ def _under(parts: tuple, directory: str, child: str) -> bool:
         if part == directory and index + 1 < len(parts) - 1 and parts[index + 1] == child:
             return True
     return False
+
+
+def _in_rules_folder(relative: str) -> bool:
+    """Return True for a file inside ``.github/agents/``, ``.cursor/rules/``, or a ``.clinerules*`` folder."""
+    parts = tuple(part for part in relative.split("/") if part and part != ".")
+    if _under(parts, ".github", "agents") or _under(parts, ".cursor", "rules"):
+        return True
+    return any(part.startswith(".clinerules") for part in parts[:-1])
+
+
+def _binary_skippable(relative: str) -> bool:
+    name = relative.rsplit("/", 1)[-1]
+    if name not in _BINARY_SKIP_NAMES and not name.lower().endswith(_BINARY_SKIP_SUFFIXES):
+        return False
+    return _in_rules_folder(relative)
 
 
 def _skip_dir(name: str) -> bool:
@@ -285,19 +316,32 @@ def _relative_or_abs(root: Path, filename: str) -> str:
         return str(filename)
 
 
-def read_text(path: Path) -> tuple:
+BINARY_NOTE = "known binary file type (not valid UTF-8, or contains NUL bytes) was listed and not scanned"
+NUL_ERROR = "file contains NUL bytes; its text was scanned, but it is not a known binary type"
+
+
+def read_text(path: Path, allow_binary_skip: bool = False) -> tuple:
+    """Return ``(text, error, skipped_note)``. At most one of them is not None."""
     try:
         size = path.stat().st_size
     except OSError as exc:
-        return None, "could not stat file: {0}".format(exc.strerror or exc.__class__.__name__)
+        return None, "could not stat file: {0}".format(exc.strerror or exc.__class__.__name__), None
     if size > MAX_BYTES:
-        return None, "file is larger than {0} bytes and was not scanned".format(MAX_BYTES)
+        return None, "file is larger than {0} bytes and was not scanned".format(MAX_BYTES), None
     try:
-        return path.read_text(encoding="utf-8"), None
-    except UnicodeDecodeError:
-        return None, "file is not valid UTF-8 and was not scanned"
+        data = path.read_bytes()
     except OSError as exc:
-        return None, "could not read file: {0}".format(exc.strerror or exc.__class__.__name__)
+        return None, "could not read file: {0}".format(exc.strerror or exc.__class__.__name__), None
+    if allow_binary_skip and b"\x00" in data:
+        return None, None, BINARY_NOTE
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        if allow_binary_skip:
+            return None, None, BINARY_NOTE
+        return None, "file is not valid UTF-8 and was not scanned", None
+    # Match Path.read_text(): universal newlines.
+    return text.replace("\r\n", "\n").replace("\r", "\n"), None, None
 
 
 def _escape_shown(text: str) -> str:
@@ -713,6 +757,49 @@ def _walk_hooks(value):
             stack.extend(current)
 
 
+def _is_claude_settings(relative: str) -> bool:
+    parts = relative.split("/")
+    name = parts[-1]
+    parent = parts[-2] if len(parts) > 1 else ""
+    return parent == ".claude" and name.startswith("settings") and name.endswith(".json")
+
+
+def scan_mcpjson_approval(relative: str, text: str, data) -> list:
+    """Flag Claude Code settings that approve project ``.mcp.json`` servers without a prompt."""
+    if not _is_claude_settings(relative) or not isinstance(data, dict):
+        return []
+    findings = []
+    if data.get(_MCPJSON_APPROVE_ALL) is True:
+        findings.append(
+            _finding(
+                "FAIL",
+                "permission-bypass",
+                relative,
+                _key_line(text, _MCPJSON_APPROVE_ALL),
+                "permission bypass setting: {0} is true (approves every project .mcp.json server without a prompt)".format(
+                    _MCPJSON_APPROVE_ALL
+                ),
+            )
+        )
+    approved = data.get(_MCPJSON_APPROVE_LIST)
+    if isinstance(approved, list):
+        names = [str(item) for item in approved if isinstance(item, str) and item.strip()]
+        if names:
+            shown = ", ".join(_escape_shown(name) for name in names)
+            if len(shown) > 120:
+                shown = shown[:117] + "..."
+            findings.append(
+                _finding(
+                    "FAIL",
+                    "permission-bypass",
+                    relative,
+                    _key_line(text, _MCPJSON_APPROVE_LIST),
+                    "permission bypass setting: {0} pre-approves .mcp.json servers: {1}".format(_MCPJSON_APPROVE_LIST, shown),
+                )
+            )
+    return findings
+
+
 def scan_hooks(relative: str, text: str, data) -> list:
     if not any(True for _ in _walk_hooks(data)):
         return []
@@ -767,6 +854,7 @@ def scan_config(relative: str, text: str) -> tuple:
         findings = []
         findings.extend(scan_mcp(relative, text, data))
         findings.extend(scan_hooks(relative, text, data))
+        findings.extend(scan_mcpjson_approval(relative, text, data))
     except json.JSONDecodeError as exc:
         return [], "invalid JSON at line {0}".format(exc.lineno)
     except RecursionError:
@@ -777,20 +865,33 @@ def scan_config(relative: str, text: str) -> tuple:
 
 
 def scan_file(item: dict, known: Optional[set]) -> tuple:
-    text, error = read_text(item["absolute"])
+    """Return ``(findings, errors)`` for one inventoried file."""
+    findings, errors, _skipped = scan_file_full(item, known)
+    return findings, errors
+
+
+def scan_file_full(item: dict, known: Optional[set]) -> tuple:
+    """Return ``(findings, errors, skipped)`` for one inventoried file."""
+    in_folder = item["kind"] in RULE_KINDS and _in_rules_folder(item["path"])
+    allow_skip = in_folder and _binary_skippable(item["path"])
+    text, error, note = read_text(item["absolute"], allow_binary_skip=allow_skip)
+    if note is not None:
+        return [], [], [{"path": item["path"], "message": note}]
     if error is not None:
-        return [], {"path": item["path"], "line": None, "message": error}
+        return [], [{"path": item["path"], "line": None, "message": error}], []
+    errors = []
+    if in_folder and "\x00" in text:
+        errors.append({"path": item["path"], "line": None, "message": NUL_ERROR})
     findings = []
     findings.extend(scan_unicode(item["path"], text))
     for line_no, line in enumerate(text.splitlines(), start=1):
         findings.extend(scan_line_patterns(item["path"], item["kind"], line_no, line, known))
-    errors = []
     if item["kind"] == "config":
         config_findings, config_error = scan_config(item["path"], text)
         findings.extend(config_findings)
         if config_error is not None:
             errors.append({"path": item["path"], "line": None, "message": config_error})
-    return findings, errors
+    return findings, errors, []
 
 
 def load_known_packages(path: Path) -> set:
@@ -813,16 +914,16 @@ def load_known_packages(path: Path) -> set:
 def examine(root: Path, known: Optional[set]) -> dict:
     files, errors = inventory(root)
     findings = []
+    skipped = []
     for item in files:
-        file_findings, file_errors = scan_file(item, known)
+        file_findings, file_errors, file_skipped = scan_file_full(item, known)
         findings.extend(file_findings)
-        if isinstance(file_errors, dict):
-            errors.append(file_errors)
-        else:
-            errors.extend(file_errors)
+        errors.extend(file_errors)
+        skipped.extend(file_skipped)
     findings = _dedupe(findings)
     findings.sort(key=lambda item: (item["path"], item["line"] or 0, 0 if item["severity"] == "FAIL" else 1, item["check"], item["message"]))
     errors.sort(key=lambda item: (item["path"], item["message"]))
+    skipped.sort(key=lambda item: item["path"])
     public_files = [{"path": item["path"], "kind": item["kind"]} for item in files]
     summary = {
         "files": len(public_files),
@@ -835,6 +936,7 @@ def examine(root: Path, known: Optional[set]) -> dict:
         "files": public_files,
         "findings": findings,
         "errors": errors,
+        "skipped": skipped,
         "summary": summary,
     }
 
@@ -867,6 +969,11 @@ def format_text(report: dict) -> str:
     if report["errors"]:
         lines.append("errors:")
         for item in report["errors"]:
+            lines.append("  {0}: {1}".format(_escape_shown(item["path"]), _escape_shown(item["message"])))
+        lines.append("")
+    if report.get("skipped"):
+        lines.append("skipped:")
+        for item in report["skipped"]:
             lines.append("  {0}: {1}".format(_escape_shown(item["path"]), _escape_shown(item["message"])))
         lines.append("")
     if not report["findings"]:
@@ -944,17 +1051,17 @@ def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(argv)
     root = Path(args.directory)
     if not root.exists():
-        print("error: directory not found: {0}".format(root), file=sys.stderr)
+        print("error: directory not found: {0}".format(_escape_shown(str(root))), file=sys.stderr)
         return EXIT_USAGE
     if not root.is_dir():
-        print("error: path is not a directory: {0}".format(root), file=sys.stderr)
+        print("error: path is not a directory: {0}".format(_escape_shown(str(root))), file=sys.stderr)
         return EXIT_USAGE
     known = None
     if args.known_packages:
         try:
             known = load_known_packages(Path(args.known_packages))
         except UsageError as exc:
-            print("error: {0}".format(exc), file=sys.stderr)
+            print("error: {0}".format(_escape_shown(str(exc))), file=sys.stderr)
             return EXIT_USAGE
     report = examine(root, known)
     if args.json:
