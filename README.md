@@ -42,7 +42,7 @@ agent-repo-preflight examples/clean --json
 agent-repo-preflight . --known-packages examples/known-packages.txt
 ```
 
-The positional argument is a local directory. The checker walks it, inventories the paths listed under [Files it inventories](#files-it-inventories), and prints a table. `--json` prints the same result as JSON. `--version` prints `agent-repo-preflight 0.1.0`. `--known-packages FILE` is an allowlist, one package name per line. `#` starts a comment. With that flag, package tokens on install or remove lines in rule files are compared with the list.
+The positional argument is a local directory. The checker walks it, inventories the paths listed under [Files it inventories](#files-it-inventories), and prints a table. `--json` prints the same result as JSON. `--version` prints `agent-repo-preflight 0.1.1`. `--known-packages FILE` is an allowlist, one package name per line. `#` starts a comment. With that flag, package tokens on install or remove lines in rule files and `.github/agents/` files are compared with the list.
 
 `examples/clean` is a benign fixture. That run exits `0`. Scanning this repository's own root also exits `0`: the only inventoried files are that fixture.
 
@@ -54,15 +54,16 @@ The positional argument is a local directory. The checker walks it, inventories 
 Agent repo preflight
 
 root: examples/clean
-files inventoried: 2
+files inventoried: 3
 
 inventoried:
   .cursor/rules/style.md  (rule)
+  .github/agents/docs-reviewer.agent.md  (agent)
   AGENTS.md  (rule)
 
 No findings.
 
-summary: files=2 warn=0 fail=0 errors=0
+summary: files=3 warn=0 fail=0 errors=0
 This is a reading of local files. It is not permission to open the repository in a coding agent.
 ```
 
@@ -102,7 +103,7 @@ The hidden character is reported by code point. The output does not echo the cha
 | `permission-bypass` | No enabled auto-approve, yolo, skip-permissions, bypass-permissions, or `dangerously-*` setting | | The phrase is present and is not assigned `false`, `off`, `no`, `disabled`, or `never` |
 | `mcp-command` | No MCP server entry with a non-empty `command` or `args` | | A server under `mcpServers`, or under `servers` in an `mcp.json` or an `mcp` object, declares `command` or `args` |
 | `hooks` | No hook definition | | A JSON `hooks` value contains a `type`, `command`, or `matcher` object, or a non-empty string |
-| `unknown-package` | The flag was omitted, or every package token on a rule-file install line is on the allowlist | A package token in a rule file is not on the `--known-packages` list | |
+| `unknown-package` | The flag was omitted, or every package token on a rule-file or `.github/agents/` install line is on the allowlist | A package token in a rule file or a `.github/agents/` file is not on the `--known-packages` list | |
 
 A phrase immediately after `do not`, `don't`, `never`, `without`, `avoid`, `no`, `not`, `cannot`, or `disable` is not flagged for `package-install`, `remote-script`, or `permission-bypass`. Hidden characters, MCP command entries, and hook definitions are still flagged. An allowlisted package still produces `package-install` when the install line is present. `unknown-package` is the extra row for a name that is absent from the list. Config files are not mined for package names.
 
@@ -114,6 +115,10 @@ WARN and FAIL are both findings. Either one makes the process exit `1`.
 | --- | --- |
 | `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.cursor/rules/**`, `.github/copilot-instructions.md`, `.clinerules*`, `.windsurfrules`, `CONVENTIONS.md` | rule |
 | `.cursor/mcp.json`, `.vscode/mcp.json`, `.vscode/settings.json`, `.claude/settings*.json`, `.zcode/config.json` | config |
+| `.github/agents/**/*.md`, which includes `*.agent.md`: GitHub Copilot custom agent profiles ([GitHub Docs](https://docs.github.com/en/copilot/reference/custom-agents-configuration)) | agent |
+| Any other file under `.github/agents/` | agent-other |
+
+`agent` and `agent-other` files get the same checks as `rule` files: `hidden-unicode`, `package-install`, `remote-script`, `permission-bypass`, and, with `--known-packages`, `unknown-package`. A file under `.github/agents/` whose name is already in the rule or config rows, such as `.github/agents/AGENTS.md`, keeps that kind. Subfolders of `.github/agents/` are included.
 
 Names are case-sensitive. A match in any directory is inventoried. These directory names are skipped: `.git`, `.hg`, `.svn`, `.eggs`, `.tox`, `.venv`, `venv`, `node_modules`, `__pycache__`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `dist`, `build`, `site-packages`, and names ending in `.egg-info`. A symlinked file that would be inventoried is not followed and is reported as an error. Every symlinked directory the walk encounters is reported as an error and is not followed.
 
@@ -128,6 +133,7 @@ It walks the directory you name, prints one row per finding with `file:line` whe
 - It does not execute a command, install a package, open a network connection, or modify a file.
 - It does not decide that a repository is safe to open in a coding agent. A clean table means these patterns were absent from the inventoried files.
 - It does not read source files, READMEs, or workflow files unless the name is in the inventory list.
+- It does not parse the YAML frontmatter of a custom agent profile. An `mcp-servers` entry with a `command` in a `.github/agents/` file is not an `mcp-command` finding. Its lines still get the line checks.
 - It does not start an MCP server, call a hook, or connect to a `url` entry. A URL-only server entry is inventoried and is not an `mcp-command` finding.
 - A symlink given as the root argument is followed. Every symlinked directory encountered during the walk, including `node_modules`, is reported and gives exit 2 by design. Dangling symlinked directories are reported too. It does not scan a file larger than 2 MiB.
 - It does not treat a warning as a clean result. Warnings exit `1`.
@@ -147,7 +153,7 @@ It walks the directory you name, prints one row per finding with `file:line` whe
 
 ## Limitations
 
-The checks are line-oriented heuristics. A negated sentence within a few words of a phrase is skipped for three of the checks, and a prose sentence that mentions an install without those words can be missed. Package names are tokens from an install or remove line, not every word in the file. Hook detection looks for a JSON `hooks` object with a `type`, `command`, `matcher`, or string entry. Another product's schema can be missed. A pass is not a guarantee that the repository is safe to open, and a finding is not by itself a judgment that the line is malicious. A person still reads the file.
+The checks are line-oriented heuristics. A negated sentence within a few words of a phrase is skipped for three of the checks, and a prose sentence that mentions an install without those words can be missed. Package names are tokens from an install or remove line, not every word in the file. Hook detection looks for a JSON `hooks` object with a `type`, `command`, `matcher`, or string entry. Another product's schema can be missed. Custom agent coverage is the repository-level `.github/agents/` folder only. Organization and enterprise agent profiles live in a top-level `agents/` folder of a `.github` or `.github-private` repository, and personal profiles live in `~/.copilot/agents/`. Neither is inventoried. Every file under `.github/agents/` is read as UTF-8 text, so an image or other binary file there is an error and gives exit 2. A pass is not a guarantee that the repository is safe to open, and a finding is not by itself a judgment that the line is malicious. A person still reads the file.
 
 ## Authorized use
 
@@ -176,6 +182,10 @@ python3 -m unittest discover -s tests -v
 `.github/workflows/ci.yml` runs that command on `ubuntu-24.04` for Python 3.9, 3.10, 3.11, 3.12, and 3.13. It does not install packages and it does not open a network connection.
 
 ## Changelog
+
+### v0.1.1
+
+- Inventory GitHub Copilot custom agent profiles under `.github/agents/` (kind `agent`) and any other file in that folder (kind `agent-other`), and run the rule-file checks on them.
 
 ### v0.1.0
 

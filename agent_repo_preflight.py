@@ -18,7 +18,7 @@ import unicodedata
 from pathlib import Path
 from typing import Optional
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -36,6 +36,12 @@ RULE_FILENAMES = frozenset(
         "CONVENTIONS.md",
     }
 )
+
+# Kinds that get the rule-file checks, including the unknown-package comparison.
+# ``agent`` is a GitHub Copilot custom agent profile: a ``.md`` file (which
+# includes ``.agent.md``) anywhere under ``.github/agents/``. ``agent-other`` is
+# any other file in that folder; it is scanned the same way.
+RULE_KINDS = frozenset({"rule", "agent", "agent-other"})
 
 SKIP_DIR_NAMES = frozenset(
     {
@@ -166,7 +172,7 @@ class UsageError(Exception):
 
 
 def classify(relative: str) -> Optional[str]:
-    """Return ``rule`` or ``config`` when ``relative`` is an inventoried file."""
+    """Return ``rule``, ``config``, ``agent``, or ``agent-other`` for an inventoried file."""
     parts = tuple(part for part in relative.split("/") if part and part != ".")
     if not parts:
         return None
@@ -188,6 +194,8 @@ def classify(relative: str) -> Optional[str]:
         return "config"
     if parent == ".claude" and name.startswith("settings") and name.endswith(".json"):
         return "config"
+    if _under(parts, ".github", "agents"):
+        return "agent" if name.endswith(".md") else "agent-other"
     return None
 
 
@@ -426,7 +434,7 @@ def scan_line_patterns(relative: str, kind: str, line_no: int, line: str, known:
                 "install or replace instruction: {0}".format(_escape_shown(install.group(0))),
             )
         )
-        if known is not None and kind == "rule":
+        if known is not None and kind in RULE_KINDS:
             for name in packages_from_line(line):
                 if name.lower() not in known:
                     findings.append(
@@ -905,7 +913,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-repo-preflight",
         description=(
-            "Inventory agent rule files and repo-declared MCP or hook config in a "
+            "Inventory agent rule files, GitHub Copilot custom agent profiles, and "
+            "repo-declared MCP or hook config in a "
             "local directory, and flag hidden Unicode, package install instructions, "
             "remote script fetch-and-run lines, permission-bypass settings, MCP "
             "command entries, and hook definitions. Read-only: does not execute, "
